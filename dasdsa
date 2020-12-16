@@ -1,0 +1,47 @@
+Hadoop to ORACLE
+
+driver = 'oracle.jdbc.driver.OracleDriver'
+connection_string = 'jdbc:oracle:thin:@//st1edwd03f.server.rbsgrp.mde:1559/UOGBERD1'
+ 
+dbuser = 'EDI_STG_OWNER'
+dbpass = 'PASSWORD'
+ 
+source_table = 'bdschn01p.chn_tqfcs18_ss_hst'
+source_predicate = "WHERE edi_business_day BETWEEN '2018-01-18' AND '2018-01-26' AND src_sys_inst_id = 'NWB'"
+ 
+target_table = 'EDI_STG_OWNER.CHN_TQFCS18_EXTRACT'
+ 
+ 
+df = spark.sql("select * from " + source_table + " " + source_predicate)
+properties={"driver": driver, "user": dbuser, "password": dbpass}
+url = connection_string
+table = target_table
+ 
+df.write.jdbc(url=url, table=table, mode="append", properties=properties)
+
+----
+--DROP TABLE bddlsold01p.tenant_location_sizes_mg
+ 
+--CREATE TABLE bddlsold01p.tenant_location_sizes_mg (database_name STRING, hdfs_location STRING, hdfs_tenant STRING, --raw_bytes BIGINT, updated_at TIMESTAMP)
+ 
+INSERT INTO bddlsold01p.tenant_location_sizes_mg
+SELECT
+split_part(object_name, '.', 1) as database_name,
+split_part(hdfs_location, '/', 5) as hdfs_location,
+split_part(hdfs_location, '/', 6) as hdfs_tenant,
+sum(raw_bytes) as raw_bytes,
+from_timestamp(now(), 'yyyy-MM-dd') as updated_at
+FROM bdmsysmg01p.sys_hdfs_statistics_vc
+WHERE split_part(hdfs_location, '/', 5) in ('eas_uca', 'data-discovery', 'source-history', 'deployed-analytics', 'enterprise-analytics-store')
+GROUP BY database_name, split_part(hdfs_location, '/', 5), hdfs_location, hdfs_tenant
+ 
+--SELECT *
+--FROM bddlsold01p.tenant_location_sizes_mg
+--WHERE updated_at = '2020-05-21'
+--LIMIT 100
+
+
+switch prd_mm
+> export KEYTAB=/export/home/jimenl/security/fp-prd-trn-eas-raw.keytab
+> export PRINCIPAL=fp-prd-trn-eas-raw@EUROPA.RBSGRP.NET
+> cd /opt/spark/latest/bin && ./spark-shell --master yarn --deploy-mode client --keytab $KEYTAB --principal $PRINCIPAL --conf spark.driver.extraJavaOptions=-Djava.security.krb5.conf=$KRB5_CONFIG && cd -
