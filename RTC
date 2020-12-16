@@ -1,0 +1,902 @@
+Check Counts and views in notebook
+
+def migViewCreationCheck(rawDbName : String, system_db: String){
+    for (row <- list_mapped){
+        var rawTableName = s"${row("tableName")}"
+        val republish = spark.sql("SELECT * FROM republish_all where raw_table='"+rawDbName+"."+rawTableName+"'")
+        //If there is a table in mapping
+        if (republish.count > 0){
+            val sh = republish.select("sh_table").collectAsList().get(0).toString.drop(1).dropRight(1)
+            val shDatabaseName = sh.split('.')(0)
+            val shTableName = sh.split('.')(1)
+            if (spark.catalog.tableExists(shDatabaseName + "." + shTableName + "_v_mig")){
+                if(spark.catalog.tableExists(shDatabaseName + "." + shTableName + "_v")){
+                    var maxShDay = spark.sql("SELECT MAX(edi_business_day) as edi_business_day FROM "+shDatabaseName+"."+shTableName+"_v").collectAsList().get(0).toString
+                    var maxRawDay = spark.sql("SELECT MAX(edi_business_day) as edi_business_day FROM "+rawDbName+"."+rawTableName+"_v").collectAsList().get(0).toString
+                    if (maxRawDay == maxShDay){
+                        println("INFO:Table "+shDatabaseName+"."+shTableName+"_v has been successfully migrated")
+                    }else{
+                        println("ERROR: Table "+rawDbName+"."+rawTableName+"_v Requires Manual Investigation")
+                    }
+                }else{
+                    println("ERROR: Table "+shDatabaseName+"."+shTableName+"_v It is not created")
+                }
+            }else{
+                
+                println("WARNING: There is NOT v_mig created for "+shDatabaseName+"."+shTableName)
+            }
+            
+        }else{
+            
+        }
+    }
+}
+
+def migViewCountCheck(rawDbName : String, system_db: String){
+    for (row <- list_mapped){
+        var rawTableName = s"${row("tableName")}"
+        val republish = spark.sql("SELECT * FROM republish_all where raw_table='"+rawDbName+"."+rawTableName+"'")
+        //If there is a table in mapping
+        if (republish.count > 0){
+            val sh = republish.select("sh_table").collectAsList().get(0).toString.drop(1).dropRight(1)
+            val shDatabaseName = sh.split('.')(0)
+            val shTableName = sh.split('.')(1)
+            if (spark.catalog.tableExists(shDatabaseName + "." + shTableName + "_v_mig")){
+                if(spark.catalog.tableExists(shDatabaseName + "." + shTableName + "_v")){
+                    var maxShDay = spark.sql("SELECT MAX(edi_business_day) as edi_business_day FROM "+shDatabaseName+"."+shTableName+"_v").collectAsList().get(0).toString.drop(1).dropRight(1)
+                    var maxRawDay = spark.sql("SELECT MAX(edi_business_day) as edi_business_day FROM "+rawDbName+"."+rawTableName+"_v").collectAsList().get(0).toString.drop(1).dropRight(1)
+                    if (maxRawDay == maxShDay){
+                        println("INFO:Table "+shDatabaseName+"."+shTableName+"_v has been successfully migrated")
+                        var countSH = spark.sql("SELECT COUNT(*) as count FROM "+shDatabaseName+"."+shTableName+"_v where edi_business_day = '"+maxShDay+"'").collectAsList().get(0).toString.drop(1).dropRight(1)
+                        var countRaw = spark.sql("SELECT COUNT(*) as count FROM "+rawDbName+"."+rawTableName+"_v where edi_business_day = '"+maxRawDay+"'").collectAsList().get(0).toString.drop(1).dropRight(1)
+                        if(countSH == countRaw){
+                          println("INFO:Table "+shDatabaseName+"."+shTableName+"_v ("+countSH+") has same row count than "+rawDbName+"."+rawTableName+" ("+countRaw+")") 
+                        }else{
+                          println("ERROR:Table "+shDatabaseName+"."+shTableName+"_v has NOT the same row count than "+rawDbName+"."+rawTableName) 
+                        }
+                    }
+                }
+            }
+            
+        }
+    }
+}
+
+////////////DDL EXTRACTION
+
+//PARAMATERS PARAGRAPH
+// Set parameters for replication
+//RUN this paragraph first
+var oldDbName = "bdsrmd01d" //SH database ending in d
+var newdbName = "bdsrmd01n"//SH database ending in n
+var oldPath = "NO REQUIRED" //in the case of dir change
+var newPath = "NO REQUIRED"// in the case of dir change
+var textFileName = "bdsrmd01n_DDL.txt"// output file name, MUST end in ".txt"
+var RACFID = "harihad" //racfid to save it in your user/temp
+
+//DDL EXTRACTION PARAPGRAH
+//run this paragraph second
+import org.apache.spark.sql.{ DataFrame, Row, SQLContext }
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.SparkSession
+import scala.collection.mutable.ListBuffer
+
+val results_emptydata = Seq(
+Row("", "", "", "", "", "")
+)
+
+
+val results_schema = StructType(
+    List(
+    StructField("DDL", StringType, true),
+    StructField("tableName", StringType, true),
+    StructField("dbName", StringType, true),
+    StructField("newdbName", StringType, true),
+    StructField("oldPath", StringType, true),
+    StructField("newPath", StringType, true)
+        )
+    )
+
+
+var results_DF = spark.createDataFrame(
+    spark.sparkContext.parallelize(results_emptydata),
+    results_schema
+    )
+
+
+var MetaData_DF = spark.sql(s"SHOW TABLES IN ${oldDbName}")
+var table_list_mapped = MetaData_DF.collect.map(row => Map(MetaData_DF.columns.zip(row.toSeq):_*))
+
+for (row <- table_list_mapped){
+    //variables
+    var tableName = s"${row("tableName")}"
+    var dbName = s"${row("database")}"
+
+    //DDL staments
+    var DDL_1 = spark.sql("SHOW CREATE TABLE "+dbName+"."+tableName)
+    
+    //DF with variables
+    
+    var DDL_2 = DDL_1.withColumn("tableName", lit(tableName)).withColumn("dbName", lit(dbName)).withColumn("newdbName", lit(newdbName)).withColumn("oldPath", lit(oldPath)).withColumn("newPath", lit(newPath))
+    
+    //results
+    
+   results_DF = results_DF.union(DDL_2)
+    
+}
+
+var DDL_List = results_DF.collect.map(row => Map(results_DF.columns.zip(row.toSeq):_*))
+var DDL_CREATE_STATEMENTS = new ListBuffer[String]()
+var DDL_REPAIR_STATEMENTS = new ListBuffer[String]()
+//var List = new ListBuffer[String]()
+for (row <- DDL_List){
+    //variables
+    var tableName = s"${row("tableName")}"
+    var dbName = s"${row("dbName")}"
+    var newdbName = s"${row("newdbName")}"
+    var oldPath = s"${row("oldPath")}"
+    var newPath = s"${row("newPath")}"
+    //replacement
+    
+    var DDL_VIEW_STATEMENT = s"${row("DDL")}".replace(s"${row("dbName")}", s"${row("newdbName")}")//.replace(s"${row("oldPath")}", s"${row("newPath")}")
+    println(s"-- ${row("tableName")} DDL############# \n")
+    
+    
+    
+    println(DDL_VIEW_STATEMENT+";")
+    //println(s"MSCK REPAIR TABLE ${newdbName}.${tableName};")
+    
+    if (tableName.endsWith("_v")){
+        //DDL_CREATE_STATEMENTS += s"-- ${row("tableName")} DDL"
+        //DDL_CREATE_STATEMENTS += s"${DDL_VIEW_STATEMENT};"
+        
+    } else if (tableName.endsWith("_vc")){
+
+    }else{
+        //DDL_STATEMENTS += "set hive.msck.path.validation=ignore;"
+        DDL_CREATE_STATEMENTS += s"-- ${row("tableName")} DDL"
+        DDL_CREATE_STATEMENTS += s"${DDL_VIEW_STATEMENT};"
+        DDL_REPAIR_STATEMENTS += s"MSCK REPAIR TABLE ${newdbName}.${tableName}"
+    }
+    
+}
+
+var DDL_DF = DDL_CREATE_STATEMENTS.drop(1).toDF()
+
+//Other paragraphs
+val op= DDL_DF.coalesce(1).rdd.map(_.toString().replace("[","").replace("]", "")).saveAsTextFile(s"/user/${RACFID}/temp/${textFileName}")
+println(s"File with DDL Tables from ${newdbName} have been created in temp location for user: ${RACFID}")
+
+//run this paragraph after created the tables
+//this paragraph create the views in the NFT database
+var List_DF = spark.sql(s"SHOW TABLES IN ${newdbName}")
+var list_mapped = List_DF.collect.map(row => Map(List_DF.columns.zip(row.toSeq):_*))
+for (row <- list_mapped){
+    var tableName = s"${row("tableName")}"
+    if (tableName.endsWith("_v")){
+       
+    }else if (tableName.endsWith("_vc")){
+
+    }else if(tableName.startsWith("edh_")){
+        
+    }else {
+        spark.sql("CREATE VIEW IF NOT EXISTS "+newdbName+"."+tableName+"_v AS "+"SELECT * from "+newdbName+"."+tableName)
+        println("_v created for : "+newdbName+tableName)
+        spark.sql("CREATE VIEW IF NOT EXISTS "+newdbName+"."+tableName+"_vc AS "+"SELECT * from "+newdbName+"."+tableName+" a where exists "+"( select 1 from "+newdbName+".edh_control_current cntrl WHERE "+"cntrl.edi_business_day=a.edi_business_day "+"and cntrl.src_sys_inst_id=a.src_sys_inst_id "+"and cntrl.table_name='"+tableName+"')")
+        println("_vc created for : "+newdbName+tableName)
+    }
+}
+
+//run this paragraph last
+//run only after completing the DDL table statement creation and VIEW creation
+spark.sql("set hive.msck.path.validation=ignore")
+var List_DF = spark.sql(s"SHOW TABLES IN ${newdbName}")
+var list_mapped = List_DF.collect.map(row => Map(List_DF.columns.zip(row.toSeq):_*))
+for (row <- list_mapped){
+    var tableName = s"${row("tableName")}"
+    if (tableName.endsWith("_v")){
+       
+    }else if (tableName.endsWith("_vc")){
+
+    }else if(tableName.startsWith("edh_")){
+        
+    }else {
+        println(tableName)
+        spark.sql("MSCK REPAIR TABLE "+newdbName+"."+tableName)
+        println("Table repaired : "+newdbName+tableName)
+    }
+}
+
+/////////////////////////////////////////////////////////////////// DQ Suggestions
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{ DataFrame, Row, SQLContext }
+import org.apache.spark.sql.SparkSession
+import scala.util.control.Breaks._
+import spark.implicits._
+import org.apache.spark.sql.types._
+
+
+val MetaData_Data = Seq(
+    Row("bdssam01n", "sam_alerts_ss"),
+    Row("bdssam01n", "sam_acm_item_status_history_ss"),
+    Row("bdssam01n", "sam_acm_md_wf_nodes_ss"),
+    Row("bdssam01n", "sam_acm_md_wf_alert_status_nodes_ss"),
+    Row("bdssam01n", "sam_sam_prf_res_alert_rules_ss"),
+    Row("bdssam01n", "sam_sam_qr_acc_pty_issue_ss"),
+    Row("bdssam01n", "sam_sam_prf_sb_issue_ss"),
+    Row("bdssam01n", "sam_account_ss"),
+    Row("bdssam01n", "sam_card_ss"), 
+    Row("bdssam01n", "sam_branch_ss"),
+    Row("bdssam01n", "sam_business_unit_ss"),
+    Row("bdssam01n", "sam_source_system_ss"),
+    Row("bdssam01n", "sam_account_category_ss"),
+    Row("bdssam01n", "sam_region_ss")
+    )
+    
+    
+val MetaData_Schema = StructType(
+    List(
+    StructField("db_name", StringType, true),
+    StructField("table_name", StringType, true)
+        )
+    )
+
+
+val MetaData_DF = spark.createDataFrame(
+    spark.sparkContext.parallelize(MetaData_Data),
+    MetaData_Schema
+    )
+
+var table_list_mapped = MetaData_DF.collect.map(row => Map(MetaData_DF.columns.zip(row.toSeq):_*))
+
+def get_df_to_analyze(spark: SparkSession, 
+business_date_a: Any,
+business_date_b: Any,
+db_name: String, 
+table_name: String) = {
+    
+    var df_query = s"Select * from ${db_name}.${table_name}"
+    var temp_df = spark.sql(df_query)
+    var df = temp_df.select(temp_df.columns.map(x => col(x).as(x.toLowerCase)): _*).repartition(200).cache()
+    
+    //df.show()
+    
+    df
+}
+
+
+for (row <- table_list_mapped) {
+    //Getting all the variable from the metadata table
+    var db_name: String = s"${row("db_name")}"
+    var table_name: String = s"${row("table_name")}"
+    //var created_by: String = s"${row("created_by")}"
+    //var created_date_time: String = s"${row("created_date_time")}"
+    //var is_active: String = s"${row("is_active")}"
+    
+    
+    var df = get_df_to_analyze(spark,
+    business_date_a,
+    business_date_b,
+    db_name, 
+    table_name)
+    
+    var size = df.count()
+    println(table_name)
+    println(size)
+    
+    //results_DF = results_DF.union(df_results_2)
+    
+}
+
+//// DF to test
+def get_df_to_analyze(spark: SparkSession, 
+business_date_a: Any,
+business_date_b: Any,
+db_name: String, 
+table_name: String) = {
+    
+    var df_query = s"Select * from ${db_name}.${table_name}"
+    var temp_df = spark.sql(df_query)
+    var df = temp_df.select(temp_df.columns.map(x => col(x).as(x.toLowerCase)): _*).repartition(200).cache()
+    
+    //df.show()
+    
+    df
+}
+
+def run_dequee_analysis(spark: SparkSession, df: DataFrame) = {
+    
+    
+    import com.amazon.deequ.suggestions.{ConstraintSuggestionRunner, Rules}
+    import spark.implicits._ // for toDS method
+
+    // We ask deequ to compute constraint suggestions for us on the data
+    val suggestionResult = { ConstraintSuggestionRunner()
+    // data to suggest constraints for
+      .onData(df)
+      // default set of rules for constraint suggestion
+      .addConstraintRules(Rules.DEFAULT)
+      // run data profiling and constraint suggestion
+      .run()
+    }
+
+    // We can now investigate the constraints that Deequ suggested. 
+    val suggestionDataFrame = suggestionResult.constraintSuggestions.flatMap { 
+      case (column, suggestions) => 
+        suggestions.map { constraint =>
+          (column, constraint.description, constraint.codeForConstraint)
+        } 
+    }.toSeq.toDS()
+
+    //Create view so we can query using SQL
+    suggestionDataFrame.createOrReplaceTempView("suggestions")
+    
+    //println(table_name)
+    suggestionDataFrame
+    
+}
+
+
+for (row <- table_list_mapped) {
+    //Getting all the variable from the metadata table
+    var db_name: String = s"${row("db_name")}"
+    var table_name: String = s"${row("table_name")}"
+    //var created_by: String = s"${row("created_by")}"
+    //var created_date_time: String = s"${row("created_date_time")}"
+    //var is_active: String = s"${row("is_active")}"
+    
+    
+    var df = get_df_to_analyze(spark,
+    business_date_a,
+    business_date_b,
+    db_name, 
+    table_name)
+    
+    var df_results_1 = run_dequee_analysis(spark, 
+    df)
+    
+    var df_results_2 = df_results_1.withColumn("table_name", lit(table_name))
+    
+    results_DF = results_DF.union(df_results_2)
+    
+}
+
+//////////////////////////////////////////////////////////////////////////////TESTING
+
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{ DataFrame, Row, SQLContext }
+//import org.apache.spark.sql.SparkSession
+//import scala.util.control.Breaks._
+//import spark.implicits._
+import org.apache.spark.sql.types._
+//import dev.bigspark.deequ.TransformerDeequRunner
+import com.amazon.deequ.{VerificationSuite, VerificationResult}
+import com.amazon.deequ.VerificationResult.checkResultsAsDataFrame
+import com.amazon.deequ.checks._
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import com.amazon.deequ.constraints.Constraint._
+import com.amazon.deequ.constraints._
+
+
+val MetaData_Data = Seq(
+    //Row("bdssam01n", "sam_account_category_ss", "entity_sk", "", ""),
+    //Row("bdssam01n", "sam_account_ss", "entity_sk", "", ""),
+    //Row("bdssam01n", "sam_acm_md_wf_alert_status_nodes_ss", "node_internal_id", "status_internal_id", ""),
+    //Row("bdssam01n", "sam_acm_md_wf_nodes_ss", "node_internal_id", "", ""),
+    //Row("bdssam01n", "sam_branch_ss", "entity_sk", "", ""), 
+    //Row("bdssam01n", "sam_business_unit_ss", "entity_sk", "", ""),// VERIFIED
+    //Row("bdssam01n", "sam_card_ss", "entity_sk", "", ""), //VERIFIED
+    //Row("bdssam01n", "sam_rcm_acm_item_status_history_ss", "status_history_internal_id", "", ""),//, VERIFIED
+    //Row("bdssam01n", "sam_region_ss", "entity_sk", "", ""),
+	//Row("bdssam01n", "sam_sam_prf_res_alert_rules_ss", "alert_id", "rule_id", "entity_key"),
+	//Row("bdssam01n", "grdm_grp_ngohalas_ss_v", "entity_id", "alias_type_cd", "src_sys_inst_id"),	// not cis_code 
+	//Row("bdssam01n", "sam_source_system_ss", "entity_sk", "", "") // not cis_code 
+	Row("bdssam01n", "sam_rcm_alerts_ss", "alert_internal_id", "", "")
+        )
+    
+    
+val MetaData_Schema = StructType(
+    List(
+        StructField("db_name", StringType, true),
+        StructField("table_name", StringType, true),
+        StructField("profiling_col_1", StringType, true),
+        StructField("profiling_col_2", StringType, true),
+        StructField("profiling_col_3", StringType, true)//,
+        //StructField("profiling_col_4", StringType, true)//,
+        //StructField("profiling_col_5", StringType, true),
+        //StructField("profiling_col_6", StringType, true)
+            )
+    )
+
+
+val MetaData_DF = spark.createDataFrame(
+    spark.sparkContext.parallelize(MetaData_Data),
+    MetaData_Schema
+    )
+
+var table_list_mapped = MetaData_DF.collect.map(row => Map(MetaData_DF.columns.zip(row.toSeq):_*))
+
+def get_df_to_analyze(spark: SparkSession, 
+business_date: String,
+business_date_b: String,
+db_name: String, 
+table_name: String) = {
+    
+    var df_query = s"Select * from ${db_name}.${table_name} where edi_business_day = '${business_date}'"// and '${business_date_b}'"
+    var temp_df = spark.sql(df_query)
+    var df = temp_df.select(temp_df.columns.map(x => col(x).as(x.toLowerCase)): _*).repartition(200).cache()
+    
+    //df.show()
+    
+    df
+}
+
+def run_dequee_analysis(spark: SparkSession, df: DataFrame, row: Map[String, Any]) = {
+    
+    //variables for deeque
+    var db_name: String = s"${row("db_name")}"
+    var table_name: String = s"${row("table_name")}"
+    var profiling_col_1: String = s"${row("profiling_col_1")}"
+    var profiling_col_2: String = s"${row("profiling_col_2")}"
+    var profiling_col_3: String = s"${row("profiling_col_3")}"
+    //var profiling_col_4: String = s"${row("profiling_col_4")}"
+    //var profiling_col_4: String = s"${row("profiling_col_4")}"
+    //var profiling_col_5: String = s"${row("profiling_col_5")}"
+    //var profiling_col_6: String = s"${row("profiling_col_6")}"
+    //var profiling_col_7: String = s"${row("profiling_col_7")}"
+    //var profiling_col_8: String = s"${row("profiling_col_8")}"
+    //var profiling_col_9: String = s"${row("profiling_col_9")}"
+    //var profiling_col_10: String = s"${row("profiling_col_10")}"
+    
+    
+    var key_columns_with_nulls = Seq(profiling_col_1, profiling_col_2, profiling_col_3)
+    var key_columns = key_columns_with_nulls.filter(k => k!=null && !k.equals(""))
+    
+    println(key_columns)
+    
+    //dependencies from the deequ library
+    import com.amazon.deequ.{VerificationSuite, VerificationResult}
+    import com.amazon.deequ.VerificationResult.checkResultsAsDataFrame
+    import com.amazon.deequ.checks._
+    import org.apache.spark.sql.types._
+    import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+    import com.amazon.deequ.constraints.Constraint._
+    import com.amazon.deequ.constraints._
+    ////////////////////
+    
+    val verificationResult: VerificationResult = { VerificationSuite()
+    // data to run the verification on
+    .onData(df)
+    // define a data quality check
+    .addCheck(
+        Check(CheckLevel.Error, "Data Validation Check")
+        .hasUniqueness(key_columns, (fraction: Double) => fraction > .9999)
+        .hasSize(_ > 0)
+        //.isComplete(key_columns)
+        //.hasUniqueness(Seq("acc_subacc_no", "acc_account_no", "src_sys_inst_id", "edi_business_day"), Check.IsOne, Some("hint")).where("acc_account_no != '99999999'")
+        //.isComplete("acc_subacc_no") // should never be NULL
+        //.isUnique("acc_subacc_no") // should not contain duplicates
+        //.isNonNegative("acc_balance_os") // should not contain negative values
+        )
+        // compute metrics and verify check conditions
+        .run()
+        
+    }
+    //Convert to df and create view for SQL analysis
+    var df_results = checkResultsAsDataFrame(spark, verificationResult)
+    df_results.createOrReplaceTempView("df_results")
+    
+    
+    println(table_name)
+    df.count()
+    df_results
+    
+}
+
+val results_emptydata = Seq(
+    Row("", "", "", "", "", "", "", "")
+    )
+    
+    
+val results_schema = StructType(
+    List(
+    StructField("check", StringType, true),
+    StructField("check_level", StringType, true),
+    StructField("check_status", StringType, true),
+    StructField("constraint", StringType, true),
+    StructField("constraint_status", StringType, true),
+    StructField("constraint_message", StringType, true),
+    StructField("table_name", StringType, true),
+    StructField("edi_business_day", StringType, true)
+        )
+    )
+
+
+var results_DF = spark.createDataFrame(
+    spark.sparkContext.parallelize(results_emptydata),
+    results_schema
+    )
+    
+for (row <- table_list_mapped) {
+    for (date <- business_date_list) {
+        //Getting all the variable from the metadata table
+        var db_name: String = s"${row("db_name")}"
+        var table_name: String = s"${row("table_name")}"
+        var business_date: String = date
+        //var created_by: String = s"${row("created_by")}"
+        //var created_date_time: String = s"${row("created_date_time")}"
+        //var is_active: String = s"${row("is_active")}"
+        
+        
+        var df = get_df_to_analyze(spark,
+        business_date,
+        business_date_b,
+        db_name, 
+        table_name)
+        
+        var df_results_1 = run_dequee_analysis(spark, 
+        df, 
+        row)
+        
+        var df_results_2 = df_results_1.withColumn("table_name", lit(table_name)).withColumn("edi_business_day", lit(business_date))
+        
+        results_DF = results_DF.union(df_results_2)
+    }
+       //df_results_2.show(truncate=false)
+    
+}
+
+/////////////////////////////////////////////////////////////DROP STATEMENT creator PYTHON
+## create a list with all tables and views from the db that requires cleaning
+## if edh_control_dq rules is in the list remove
+tableList =["edh_control_audit"
+,"edh_control_current"
+,"edh_control_dq_analysis_results"
+,"edh_control_dq_check_results"
+,"edh_control_dq_metric"
+,"edh_control_dq_rules"
+,"edh_control_dq_status"
+]
+
+## set the database and run. Copy and paste in HUE, select all and run. 
+dbName = "bdwvar01n"
+for table in tableList:
+    if table.endswith("_v") or table.endswith("_vc") or table.endswith("_mig"):
+        print("DROP VIEW IF EXISTS "+dbName+"."+table+";")
+    else:
+        print("ALTER TABLE "+dbName+"."+table+" SET TBLPROPERTIES('EXTERNAL'='False'); DROP TABLE "+dbName+"."+table+";")
+
+//////////////////////////////////////////////////Message Checker Python
+
+NumberExistingTables = 0
+NumberMissingTables = 0
+TableListComparation = []
+for message in messages:
+    #Change dbname with the one you are checking
+    if message["databaseName"] == "bdwcdb01n":
+        
+        if message["tableName"] in table_list :
+            #print("Table in table_list: " + message["tableName"])
+            NumberExistingTables += 1
+            TableListComparation.append(message["tableName"])
+        else :
+            print("Error Table NOT in table_list: "+ message["tableName"])
+            NumberMissingTables += 1
+print("============Total of correct tables in messages==============\n"+ str(NumberExistingTables))
+print("============Total of tables with error in table name=========\n" + str(NumberMissingTables))
+ListTablesMissing = [table for table in table_list if table not in TableListComparation]
+print("============List of tables missing in the inbound topic=========")
+print(ListTablesMissing)
+
+////////////////////////////////////////////////////////////SPARK TUNNING
+
+##Broadcast 
+
+from pyspark.sql.functions import broadcast
+df_massive.join(broadcast(df_larger), df_massive.big_id == df_larger.id, "leftouter").count()
+
+print(df_massive.rdd.getNumPartitions())
+print(df_large.rdd.getNumPartitions())
+print(df_larger.rdd.getNumPartitions())
+
+#Total number of partitions - total number of files
+print(df_massive.rdd.getNumPartitions())
+#Total number of partitions for a given edi_business_day - Partitions == Number of files in the table partition
+print(df_massive.filter("edi_business_day='2020-04-01'").rdd.getNumPartitions())
+#Total number of partitions for a given range - Partitions == Number of files in the selected table partitions 
+print(df_massive.filter("edi_business_day>='2020-04-01'").rdd.getNumPartitions())
+
+from pyspark.sql.functions import broadcast
+path="/nft/data-discovery/datadlv/sold/"
+dbName="bddlsold01n"
+
+
+#Lets look at what happens by default
+df_massive_new1 = df_massive.alias("massive").join(broadcast(df_large.alias("big")), df_massive.big_id == df_large.id, "leftouter")\
+    .filter("edi_business_day >= '2020-04-01' and edi_business_day <= '2020-04-02'")\
+    .selectExpr("massive.*", "big.desc as big_desc")
+
+#How many partitions and why - The left table partition structure is preserved?
+df_massive_new1.rdd.getNumPartitions()
+
+#Lets Save as is - How many files and what size do we see? Why?
+tblName=f"bs_train_{spark.sparkContext.sparkUser()}_tuning1"
+df_massive_new1.write.format("parquet").mode("overwrite").option("path",f"{path}/data/{tblName}").partitionBy("edi_business_day").saveAsTable(f"{dbName}.{tblName}")
+
+#Lets Save by upping the number of partitions - How many files and what size do we see? Why?
+tblName=f"bs_train_{spark.sparkContext.sparkUser()}_tuning2"
+df_massive_new1.repartition(10).write.format("parquet").mode("overwrite").option("path",f"{path}/data/{tblName}").partitionBy("edi_business_day").saveAsTable(f"{dbName}.{tblName}")
+
+#Lets save with a repartition to 1 - How many files and what size do we see? Why?
+tblName=f"bs_train_{spark.sparkContext.sparkUser()}_tuning3"
+df_massive_new1.repartition(1).write.format("parquet").mode("overwrite").option("path",f"{path}/data/{tblName}").partitionBy("edi_business_day").saveAsTable(f"{dbName}.{tblName}")
+
+#Lets save with a coalesce to 1 - How many files and what size do we see? Why?
+tblName=f"bs_train_{spark.sparkContext.sparkUser()}_tuning4"
+df_massive_new1.coalesce(1).write.format("parquet").mode("overwrite").option("path",f"{path}/data/{tblName}").partitionBy("edi_business_day").saveAsTable(f"{dbName}.{tblName}")
+
+#Lets save with a coalesce to 2 - How many files and what size do we see? Why?
+tblName=f"bs_train_{spark.sparkContext.sparkUser()}_tuning5"
+df_massive_new1.coalesce(2).write.format("parquet").mode("overwrite").option("path",f"{path}/data/{tblName}").partitionBy("edi_business_day").saveAsTable(f"{dbName}.{tblName}")
+
+df_massive_new2 = df_massive.alias("massive").join(df_larger.alias("big"), df_massive.big_id == df_larger.id, "leftouter")\
+    .filter("edi_business_day >= '2020-04-01' and edi_business_day <= '2020-04-02'")\
+    .selectExpr("massive.*", "big.desc as big_desc")
+    
+#How many partitions and why - The left table partition structure is preserved?
+df_massive_new2.rdd.getNumPartitions()
+
+#Lets save as is
+tblName=f"bs_train_{spark.sparkContext.sparkUser()}_tuning6"
+df_massive_new2.write.format("parquet").mode("overwrite").option("path",f"{path}/data/{tblName}").partitionBy("edi_business_day").saveAsTable(f"{dbName}.{tblName}")
+
+
+#Lets save with a repartiton to get nice smooth file distribution
+tblName=f"bs_train_{spark.sparkContext.sparkUser()}_tuning7"
+df_massive_new2.repartition(5).write.format("parquet").mode("overwrite").option("path",f"{path}/data/{tblName}").partitionBy("edi_business_day").saveAsTable(f"{dbName}.{tblName}")
+
+#We only want records that are divisable by 10 (for some reason), so lets get that
+df_filter = df_large.filter("id % 10 = 0")
+
+#Inner join to filter to remove records, use a leftsemi so we only get the left tables columns
+df_thought = df_massive.join(df_filter, df_massive.big_id == df_filter.id, "leftsemi" )
+
+#Join our dataframe and select the relevant columns (need an alias for selectExpr)
+df_thought = df_thought.alias("thought")\
+    .join(df_larger.alias("large"), df_massive.id == df_larger.id, "leftouter")\
+    .selectExpr("thought.*","large.desc as big_desc")
+    
+    
+print(df_thought.count())
+
+
+/////////////////////////////////////////////////////Spark Connectors
+
+#########################MOngo
+#Connection details
+password="Password1"
+uri=f"mongodb://cdduser:{password}@devecpvm003539.server.rbsgrp.net:27017/CDD.FromZeppelin?authSource=CDD"
+#Read the collection and expose for SQL querying
+df_read = spark.read.format("mongo").option("uri", uri).load()
+df_read.createOrReplaceTempView("mongo")
+
+#Connection details
+password="Password1"
+uri=f"mongodb://cdduser:{password}@devecpvm003539.server.rbsgrp.net:27017/CDD.FromZeppelin_train?authSource=CDD"
+
+#select some data to write to the cluster
+df_write = spark.sql("select * from bddlsold01n.bs_train_large")
+#And write to MongoDB using the mongo connector
+df_write.write.format("mongo").mode("overwrite").option("uri", uri).save()
+
+password="Password1"
+uri=f"mongodb://cdduser:{password}@devecpvm003539.server.rbsgrp.net:27017/CDD.FromZeppelin_train?authSource=CDD"
+df_read = spark.read.format("mongo").option("uri", uri).load()
+df_read.createOrReplaceTempView("mongo2")
+
+######################JDBC
+#Import the Java type - Equivilent to the Python "import" statement
+SparkHelper = sc._gateway.jvm.com.rbs.edh.spark.utils.SparkHelper
+
+#JDBC Properties
+username = "SUP_EDH_DB_READONLY"
+keystore = "/nft/data-discovery/datadlv/sold/code/security/SUP_EDH_DB_READONLY.jceks"
+password = SparkHelper.Security.getFromHadoopKeyStore(keystore, "sup_edh_db_readonly_nft.pwd")
+connectionString ="jdbc:oracle:thin:@//nogbbdh1st-vip.server.rbsgrp.mde:1565/NOGBBDH1" 
+driver = "oracle.jdbc.OracleDriver"
+
+#The query we want to expose to spark
+queryString = """
+select db.DB_ID, DB.NAME as DB_NAME, tbl.TBL_ID, TBL_NAME , p.PART_NAME
+from BDH_HIVE_OWNER.TBLS tbl
+inner join BDH_HIVE_OWNER.DBS db
+  on tbl.DB_ID=db.DB_ID
+inner join BDH_HIVE_OWNER.PARTITIONS p
+  on p.TBL_ID=tbl.TBL_ID
+"""
+
+#Make the connection
+df_backend_partitions = spark.read.format("jdbc")\
+					.option("url", connectionString)\
+					.option("dbtable", f"( {queryString} )")\
+					.option("user", username)\
+					.option("password", password)\
+					.option("driver", driver)\
+					.load()
+
+#And expose for SQL usage
+df_backend_partitions.createOrReplaceTempView("partitions")
+
+df_backend_partitions.rdd.getNumPartitions()
+
+
+/////////////////////////////////////////////////////////////////////////Pipeline code
+
+///////////////edi connector
+
+//Import required libraries
+import dev.bigspark.caster.EDIProcessor
+//Set configuration items into SparkContext
+EDIProcessor.setProps("${endpoint}","${access}","${secret}")
+
+//Build the pathStr from the inputDF
+val bucketName = inputs(0).select("bucketName").collectAsList.get(0)(0).toString
+val databaseName = inputs(0).select("databaseName").collectAsList.get(0)(0).toString.toLowerCase()
+val tableName = inputs(0).select("tableName").collectAsList.get(0)(0).toString.toLowerCase()
+val instance = inputs(0).select("instance").collectAsList.get(0)(0).toString
+val businessDate = inputs(0).select("businessDate").collectAsList.get(0)(0).toString
+val fileFormat = inputs(0).select("fileFormat").collectAsList.get(0)(0).toString
+
+output = EDIProcessor.fetchEDIFromS3(bucketName,databaseName,tableName,instance,businessDate, fileFormat)
+
+//////////////////////////////////////DEEQUE RUNNNER
+
+//Prepare some variables
+val databaseName = inputs(1).select("databaseName").collectAsList.get(0)(0).toString.toLowerCase()
+val tableName = inputs(1).select("tableName").collectAsList.get(0)(0).toString.toLowerCase()
+val instance = inputs(1).select("instance").collectAsList.get(0)(0).toString
+val businessDate = inputs(1).select("businessDate").collectAsList.get(0)(0).toString
+
+//Check if source schema matches target, if not, stop pipeline via Exception
+if (spark.catalog.tableExists(databaseName+"."+tableName)) {
+  //Remove partition cols for schema check
+  val sourceSchemaNoAuditCols = inputs(0).drop("SRC_SYS_INST_ID")
+  val sourceSchema = sourceSchemaNoAuditCols.schema
+  val targetDF = spark.table(databaseName+"."+tableName)
+  //Remove partition cols for schema check
+  val targetDFNoAuditCols = targetDF.drop("edi_business_day", "src_sys_inst_id")
+  val targetSchema = targetDFNoAuditCols.schema
+  if (!(sourceSchema equals targetSchema)) {
+    throw new Exception(
+      "Ingested schema does not match schema of target table. [Source schema: %s] [Target schema: %s]".format(
+        sourceSchema.fieldNames.mkString(",")
+        , targetSchema.fieldNames.mkString(",")
+      )
+    )
+  }
+}
+
+import dev.bigspark.deequ.TransformerDeequRunner
+  /**
+   * runDeequ()
+   * Main entry point for StreamSets transformer to execute deequ processing and persist outputs
+   *
+   * @param spark : SparkSession
+   * @param sourceDF : The DataFrame to operate the rules on
+   * @param businessDate : Business date of the run
+   * @param instanceID : Source instance
+   * @param targetDbName : Target database
+   * @param targetTableName : Target table
+                          
+   * @return DeequRunnerMetrics DataFrame
+   **/
+val deequMetric = TransformerDeequRunner.runDeequ(spark, inputs(0), businessDate, instance, databaseName, tableName)
+
+import org.apache.spark.sql.functions.lit
+output = deequMetric.withColumn("job_id",lit("${job:id()}")) .withColumn("pipeline_id",lit("${pipeline:id()}")).withColumn("pipeline_name",lit("${pipeline:title()}")).withColumn("pipeline_version",lit("${pipeline:version()}")).withColumn("client_name",lit("StreamSets Transformer")).withColumn("audit_time",lit(""))
+
+///////////////////////////ADD EDI_BUSINESSDAY etc
+
+val instance = inputs(1).select("instance").collectAsList.get(0)(0).toString
+val businessDate = inputs(1).select("businessDate").collectAsList.get(0)(0).toString
+import org.apache.spark.sql.functions.lit
+output = inputs(0).withColumn("src_sys_inst_id",lit(instance)).withColumn("edi_business_day",lit(businessDate))
+
+/////////////////////////////CREATE default views
+
+val items = inputs(0).select("database_name","table_name").collect()
+items.map(row => {
+   val databaseName = row.getString(0)
+   val tableName = row.getString(1)
+   if (!spark.catalog.tableExists(databaseName+"."+tableName+"_v")){ 
+   spark.sql("CREATE VIEW "+databaseName+"."+tableName+"_v AS " +
+            "SELECT * from "+databaseName+"."+tableName)
+            }
+   if (!spark.catalog.tableExists(databaseName+"."+tableName+"_vc")){          
+   spark.sql("CREATE VIEW "+databaseName+"."+tableName+"_vc AS " +
+            "SELECT * from "+databaseName+"."+tableName+" a where exists " +
+            "( select 1 from "+databaseName+".edh_control_current cntrl WHERE " +
+            "cntrl.business_date=a.edi_business_day " +
+            "and cntrl.instance=a.src_sys_inst_id " +
+            "and cntrl.table_name='"+tableName+"')")
+       }
+	}
+)
+
+output=inputs(0)
+
+///////////////////invalidate metadata
+
+import com.rbs.edh.spark.utils.eas.raw.views.ViewGenerator
+
+val items = inputs(0).select("database_name", "table_name").collect()
+val vg = new ViewGenerator("${impala_conn_string}")
+
+items.map(row => {
+  val rawDatabaseName = row.getString(0)
+  val rawTableName = row.getString(1)
+  try {
+  vg.impalaInvalidateMetadata(rawDatabaseName,rawTableName)
+  } catch {
+          case e: Exception => {
+            print("[Impala metadata] : Error in processing impala metadata for : " + rawDatabaseName + "." + rawTableName + " \n")
+            print(e + "\n")
+      }
+  }
+})
+                     
+output=inputs(0)
+
+//////////////////////////////Migration View
+
+import com.rbs.edh.spark.utils.eas.raw.views.ViewGenerator
+
+val items = inputs(0).select("database_name", "table_name").collect()
+
+if (spark.catalog.tableExists("${system_db}.edh_control_sh_publish")) {
+  spark.table("${system_db}.edh_control_sh_publish").cache.createOrReplaceTempView("republish")
+  items.map(row => {
+    val rawDatabaseName = row.getString(0)
+    val rawTableName = row.getString(1)
+    val republish = spark.sql("SELECT * FROM republish where raw_table='" + rawDatabaseName + "." + rawTableName + "'")
+    //If we have a record in metadata to map to, proceed
+    if (republish.count > 0) {
+      val sh = republish.select("sh_table").collectAsList().get(0).toString.drop(1).dropRight(1)
+      val shDatabaseName = sh.split('.')(0)
+      val shTableName = sh.split('.')(1)
+      //Check if migration view exists, if not, proceed
+      if (!spark.catalog.tableExists(shDatabaseName + "." + shTableName + "_v_mig")) {
+        val vg = new ViewGenerator("${impala_conn_string}")
+        try {
+          //Generate the new SH view SQL
+          print("[SH Migration] : Generating view for : " + rawDatabaseName + "." + rawTableName + " \n")
+          val createViewSQL = vg.manageViews(rawDatabaseName, rawTableName, shDatabaseName, shTableName)
+          //Rename existing view to _v_mig to prevent future migration attempts
+          if (spark.catalog.tableExists(shDatabaseName + "." + shTableName + "_v")) {
+            spark.sql("ALTER VIEW " + shDatabaseName + "." + shTableName + "_v RENAME TO " + shDatabaseName + "." + shTableName + "_v_mig")
+          }
+          //Recreate SH view using generated SQL
+          spark.sql(createViewSQL)
+          vg.impalaInvalidateMetadata(shDatabaseName,shTableName+"_v")
+          //Regenerate _vc view using column projection from SH views and the raw vc view
+          spark.sql("DROP VIEW IF EXISTS " + shDatabaseName + "." + shTableName + "_vc")
+          val viewSHCols = spark.table(shDatabaseName + "." + shTableName + "_v").columns
+          //Remove archived flag if present
+          val viewSHCols2 = viewSHCols.filterNot(a => a=="archived")
+          spark.sql("CREATE VIEW " + shDatabaseName + "." + shTableName + "_vc AS SELECT " + viewSHCols2.mkString(",") + " FROM " + rawDatabaseName + "." + rawTableName + "_vc")
+          vg.impalaInvalidateMetadata(shDatabaseName,shTableName+"_vc")
+        } catch {
+          case e: Exception => {
+            print("[SH Migration] : Error in processing migration view for : " + rawDatabaseName + "." + rawTableName + " \n")
+            print(e + "\n")
+          }
+        }
+      } else {
+        print("[SH Migration] : Migration view already in place, skipping : " + rawDatabaseName + "." + rawTableName + " \n")
+      }
+    } else {
+      print("[SH Migration] : No migration metadata found, skipping : " + rawDatabaseName + "." + rawTableName + " \n")
+    }
+  })
+}
+output=inputs(0)
